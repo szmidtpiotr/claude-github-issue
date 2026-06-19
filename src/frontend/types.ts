@@ -75,12 +75,22 @@ export function issueToColumnId(issue: GithubIssue): string {
   return 'todo';
 }
 
+/** A plan-only card: planned work that is NOT (yet) a GitHub issue. */
+export interface PlanItem {
+  id: string;
+  phase: string | null;   // milestone title, or null for "No phase"
+  title: string;
+  note: string;
+  order: number;
+}
+
 export interface PlanPhase {
   title: string;
   milestoneNumber: number | null;
   total: number;
   closed: number;
   issues: GithubIssue[];
+  items: PlanItem[];
 }
 
 export interface PlanData {

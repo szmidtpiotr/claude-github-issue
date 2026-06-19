@@ -416,16 +416,25 @@ async function prioritizeIssues(issues, anthropicKey) {
 var import_path2 = __toESM(require("path"));
 var import_fs2 = require("fs");
 var PLAN_FILE = ".GitHubBoard/plan.json";
+function emptyStore() {
+  return { version: 2, order: {}, items: [] };
+}
 async function readPlan(projectPath) {
-  if (!projectPath) return {};
+  if (!projectPath) return emptyStore();
   const filePath = import_path2.default.join(projectPath, PLAN_FILE);
   try {
     const content = await import_fs2.promises.readFile(filePath, "utf8");
     const parsed = JSON.parse(content);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptyStore();
+    const obj = parsed;
+    if (obj.version === 2) {
+      const order = obj.order && typeof obj.order === "object" && !Array.isArray(obj.order) ? obj.order : {};
+      const items = Array.isArray(obj.items) ? obj.items : [];
+      return { version: 2, order, items };
+    }
+    return { version: 2, order: obj, items: [] };
   } catch {
-    return {};
+    return emptyStore();
   }
 }
 async function writePlan(projectPath, store) {
@@ -439,11 +448,72 @@ async function setOrder(projectPath, phase, issueNumbers) {
   const store = await readPlan(projectPath);
   issueNumbers.forEach((num, idx) => {
     const key = String(num);
-    const existing = store[key] ?? { order: idx };
-    store[key] = { order: idx, phase: phase ?? existing.phase };
+    const existing = store.order[key] ?? { order: idx };
+    store.order[key] = { order: idx, phase: phase ?? existing.phase };
   });
   await writePlan(projectPath, store);
   return store;
+}
+async function setIssueOrder(projectPath, issueNumber, order, phase) {
+  const store = await readPlan(projectPath);
+  const key = String(issueNumber);
+  const existing = store.order[key];
+  store.order[key] = { order, phase: phase ?? existing?.phase };
+  await writePlan(projectPath, store);
+}
+var idCounter = 0;
+function newItemId() {
+  idCounter = (idCounter + 1) % 1e5;
+  return `pi_${Date.now().toString(36)}_${idCounter.toString(36)}`;
+}
+function nextItemOrder(items, phase) {
+  const inPhase = items.filter((i) => (i.phase ?? null) === (phase ?? null));
+  return inPhase.reduce((max, i) => Math.max(max, i.order + 1), 0);
+}
+async function addItem(projectPath, input) {
+  const store = await readPlan(projectPath);
+  const item = {
+    id: newItemId(),
+    phase: input.phase ?? null,
+    title: input.title,
+    note: input.note ?? "",
+    order: nextItemOrder(store.items, input.phase ?? null)
+  };
+  store.items.push(item);
+  await writePlan(projectPath, store);
+  return item;
+}
+async function updateItem(projectPath, id, patch) {
+  const store = await readPlan(projectPath);
+  const item = store.items.find((i) => i.id === id);
+  if (!item) throw new Error(`Plan item not found: ${id}`);
+  if (patch.title !== void 0) item.title = patch.title;
+  if (patch.note !== void 0) item.note = patch.note;
+  if (patch.phase !== void 0 && (patch.phase ?? null) !== (item.phase ?? null)) {
+    item.phase = patch.phase ?? null;
+    item.order = nextItemOrder(store.items.filter((i) => i.id !== id), item.phase);
+  }
+  await writePlan(projectPath, store);
+  return item;
+}
+async function deleteItem(projectPath, id) {
+  const store = await readPlan(projectPath);
+  store.items = store.items.filter((i) => i.id !== id);
+  await writePlan(projectPath, store);
+}
+async function getItem(projectPath, id) {
+  const store = await readPlan(projectPath);
+  return store.items.find((i) => i.id === id) ?? null;
+}
+async function setItemsOrder(projectPath, phase, ids) {
+  const store = await readPlan(projectPath);
+  const orderById = new Map(ids.map((id, idx) => [id, idx]));
+  for (const item of store.items) {
+    if ((item.phase ?? null) === (phase ?? null) && orderById.has(item.id)) {
+      item.order = orderById.get(item.id);
+    }
+  }
+  await writePlan(projectPath, store);
 }
 
 // src/backend/plan.controller.ts
@@ -471,8 +541,16 @@ async function buildPlan(projectPath) {
     arr.push(issue);
     groups.set(key, arr);
   }
+  const itemGroups = /* @__PURE__ */ new Map();
+  for (const item of store.items) {
+    const key = item.phase ?? NO_PHASE;
+    const arr = itemGroups.get(key) ?? [];
+    arr.push(item);
+    itemGroups.set(key, arr);
+  }
+  const sortItems = (arr) => arr.sort((a, b) => a.order !== b.order ? a.order - b.order : a.id.localeCompare(b.id));
   const orderOf = (num) => {
-    const entry = store[String(num)];
+    const entry = store.order[String(num)];
     return entry ? entry.order : Number.MAX_SAFE_INTEGER;
   };
   const sortGroup = (arr) => arr.sort((a, b) => {
@@ -482,24 +560,41 @@ async function buildPlan(projectPath) {
     return a.number - b.number;
   });
   const phases = [];
+  const usedItemKeys = /* @__PURE__ */ new Set();
   for (const m of milestones) {
     const arr = sortGroup(groups.get(String(m.number)) ?? []);
+    const items = sortItems(itemGroups.get(m.title) ?? []);
+    if (itemGroups.has(m.title)) usedItemKeys.add(m.title);
     phases.push({
       title: m.title,
       milestoneNumber: m.number,
       total: arr.length,
       closed: arr.filter((i) => i.state === "closed").length,
-      issues: arr
+      issues: arr,
+      items
     });
   }
-  const noPhase = sortGroup(groups.get(NO_PHASE) ?? []);
-  if (noPhase.length > 0) {
+  for (const [key, items] of itemGroups) {
+    if (key === NO_PHASE || usedItemKeys.has(key)) continue;
+    phases.push({
+      title: key,
+      milestoneNumber: null,
+      total: 0,
+      closed: 0,
+      issues: [],
+      items: sortItems(items)
+    });
+  }
+  const noPhaseIssues = sortGroup(groups.get(NO_PHASE) ?? []);
+  const noPhaseItems = sortItems(itemGroups.get(NO_PHASE) ?? []);
+  if (noPhaseIssues.length > 0 || noPhaseItems.length > 0) {
     phases.push({
       title: "No phase",
       milestoneNumber: null,
-      total: noPhase.length,
-      closed: noPhase.filter((i) => i.state === "closed").length,
-      issues: noPhase
+      total: noPhaseIssues.length,
+      closed: noPhaseIssues.filter((i) => i.state === "closed").length,
+      issues: noPhaseIssues,
+      items: noPhaseItems
     });
   }
   return { phases };
@@ -532,6 +627,41 @@ async function bootstrap(projectPath, phases) {
     }
   }
   return { created, assigned };
+}
+async function createItem(projectPath, input) {
+  if (!input.title?.trim()) throw new Error("title is required");
+  return addItem(projectPath, {
+    phase: input.phase ?? null,
+    title: input.title.trim(),
+    note: input.note ?? ""
+  });
+}
+async function editItem(projectPath, id, patch) {
+  return updateItem(projectPath, id, patch);
+}
+async function removeItem(projectPath, id) {
+  await deleteItem(projectPath, id);
+}
+async function reorderItems(projectPath, phase, ids) {
+  await setItemsOrder(projectPath, phase ?? null, ids);
+}
+async function promoteItem(projectPath, id) {
+  const config = await requireConfig(projectPath);
+  const item = await getItem(projectPath, id);
+  if (!item) throw new Error(`Plan item not found: ${id}`);
+  let milestoneNumber = null;
+  if (item.phase) {
+    const milestones = await listMilestones(config.token, config.owner, config.repo, "all");
+    const existing = milestones.find((m) => m.title === item.phase);
+    milestoneNumber = existing ? existing.number : (await createMilestone(config.token, config.owner, config.repo, item.phase)).number;
+  }
+  const issue = await createIssue2(projectPath, item.title, item.note);
+  if (milestoneNumber !== null) {
+    await setIssueMilestone(config.token, config.owner, config.repo, issue.number, milestoneNumber);
+  }
+  await setIssueOrder(projectPath, issue.number, item.order, item.phase);
+  await deleteItem(projectPath, id);
+  return issue;
 }
 
 // src/backend/server.ts
@@ -760,6 +890,96 @@ async function handlePostPlanBootstrap(req, res) {
     sendJson(res, 500, { error: e.message ?? "Internal error" });
   }
 }
+async function handlePostPlanItem(req, res) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw);
+    if (!body.title?.trim()) {
+      sendJson(res, 400, { error: "title is required" });
+      return;
+    }
+    const item = await createItem(projectPath, {
+      phase: body.phase ?? null,
+      title: body.title,
+      note: body.note
+    });
+    sendJson(res, 201, { ok: true, item });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message ?? "Internal error" });
+  }
+}
+async function handlePutPlanItem(req, res, id) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw);
+    const item = await editItem(projectPath, id, body);
+    sendJson(res, 200, { ok: true, item });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message ?? "Internal error" });
+  }
+}
+async function handleDeletePlanItem(req, res, id) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    await removeItem(projectPath, id);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message ?? "Internal error" });
+  }
+}
+async function handlePutPlanItemsOrder(req, res) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw);
+    if (!Array.isArray(body.order)) {
+      sendJson(res, 400, { error: "order array required" });
+      return;
+    }
+    await reorderItems(projectPath, body.phase ?? null, body.order);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: e.message ?? "Internal error" });
+  }
+}
+async function handlePromotePlanItem(req, res, id) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    const issue = await promoteItem(projectPath, id);
+    sendJson(res, 200, { ok: true, issue });
+  } catch (e) {
+    const err = e;
+    if (err.notConfigured) sendJson(res, 200, { notConfigured: true, error: err.message });
+    else sendJson(res, 500, { error: err.message ?? "Internal error" });
+  }
+}
 var server = import_http.default.createServer(async (req, res) => {
   const method = req.method ?? "GET";
   const rawUrl = req.url ?? "/";
@@ -772,7 +992,7 @@ var server = import_http.default.createServer(async (req, res) => {
   if (method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type"
     });
     res.end();
@@ -801,6 +1021,29 @@ var server = import_http.default.createServer(async (req, res) => {
     }
     if (method === "POST" && pathname === "/plan/bootstrap") {
       await handlePostPlanBootstrap(req, res);
+      return;
+    }
+    if (method === "POST" && pathname === "/plan/item") {
+      await handlePostPlanItem(req, res);
+      return;
+    }
+    if (method === "PUT" && pathname === "/plan/items/order") {
+      await handlePutPlanItemsOrder(req, res);
+      return;
+    }
+    const promoteMatch = method === "POST" && pathname.match(/^\/plan\/item\/([^/]+)\/promote$/);
+    if (promoteMatch && promoteMatch[1]) {
+      await handlePromotePlanItem(req, res, decodeURIComponent(promoteMatch[1]));
+      return;
+    }
+    const putItemMatch = method === "PUT" && pathname.match(/^\/plan\/item\/([^/]+)$/);
+    if (putItemMatch && putItemMatch[1]) {
+      await handlePutPlanItem(req, res, decodeURIComponent(putItemMatch[1]));
+      return;
+    }
+    const delItemMatch = method === "DELETE" && pathname.match(/^\/plan\/item\/([^/]+)$/);
+    if (delItemMatch && delItemMatch[1]) {
+      await handleDeletePlanItem(req, res, decodeURIComponent(delItemMatch[1]));
       return;
     }
     if (method === "POST" && pathname === "/issues") {

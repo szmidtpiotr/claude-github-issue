@@ -125,15 +125,24 @@ Keep responses short. List multiple issues as a compact table. No markdown prose
 The Plan tab groups issues by **GitHub Milestone** (= phase) and adds a per-issue
 **order** that GitHub does not store. Order lives in a plain file the agent edits directly.
 
-### Order store: `.GitHubBoard/plan.json`
+### Store: `.GitHubBoard/plan.json` (v2)
 
 ```json
 {
-  "<issue#>": { "order": <int>, "phase": "<milestone title>" }
+  "version": 2,
+  "order": { "<issue#>": { "order": 0, "phase": "FAZA L" } },
+  "items": [
+    { "id": "pi_xxx", "phase": "FAZA 5 Multiplayer", "title": "G16 lobby", "note": "free text", "order": 0 }
+  ]
 }
 ```
-- Lower `order` = higher in the phase list. `phase` is the milestone title (optional, informational).
-- Issues with no entry sort after ordered ones, by issue number.
+- `order` — issue ordering. Lower `order` = higher in the phase list. `phase` is the
+  milestone title (optional, informational). Issues with no entry sort after ordered ones,
+  by issue number.
+- `items` — **plan-only items**: planned work that is NOT a GitHub issue yet. `phase` =
+  milestone title (or `null`). `order` = position within that phase's items sub-list.
+- The old flat shape (`{ "<issue#>": { order, phase } }`, no `version`) is auto-migrated to
+  v2 on the next plugin write — safe to leave as-is or upgrade by hand.
 - The plugin backend is NOT required to edit this — read/write the file directly.
 
 ### Set a task's order
@@ -149,7 +158,37 @@ To create a milestone first:
 gh api repos/$OWNER/$REPO/milestones -f title="FAZA L"
 ```
 
+### Plan-only items (planned work, not yet an issue)
+
+An **item** is a planned task that has no GitHub issue yet (e.g. a future phase still only
+in prose). It lives in `plan.json` → `items[]`. Two ways to manage them:
+
+**A) Direct file edit** — read/append/edit `plan.json`:
+```json
+{ "id": "pi_<unique>", "phase": "FAZA 5 Multiplayer", "title": "G16 lobby", "note": "...", "order": 0 }
+```
+Give consecutive `order` (0,1,2,…) within a phase. `phase` is a milestone title or `null`.
+
+**B) Plugin API** (only when the plugin backend is reachable; usually prefer direct edit):
+- Add:     `POST   /plan/item`            body `{ phase, title, note }`
+- Edit:    `PUT    /plan/item/<id>`       body `{ title?, note?, phase? }`
+- Delete:  `DELETE /plan/item/<id>`
+- Reorder: `PUT    /plan/items/order`     body `{ phase, order: ["<id>", …] }`
+
+### Promote an item to a real issue
+
+Turns a plan-only item into a GitHub issue (title + note → issue body), assigning the
+phase's milestone (auto-created if missing) and copying the item's order.
+
+- Plugin API: `POST /plan/item/<id>/promote` → returns the created issue, removes the item.
+- Manual equivalent:
+  1. `gh issue create --title "<title>" --body "<note>" --milestone "<phase>"`
+     (create the milestone first with `gh api repos/$OWNER/$REPO/milestones -f title="<phase>"`
+     if it does not exist).
+  2. Remove that item from `plan.json` → `items[]`.
+
 ### Conventions
 - **Milestone = phase** (e.g. "FAZA L"). One milestone per phase.
 - **Priority/bug = labels** (`bug`, `P0`..`P5`) — same as the board.
 - **Done = closed**, status = labels — unchanged from the board mapping above.
+- **Plan-only item = planned-not-yet-issue.** Promote it when work is ready to start.

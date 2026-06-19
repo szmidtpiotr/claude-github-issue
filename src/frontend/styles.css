@@ -949,3 +949,32 @@
   font-size: 12px; opacity: 0.8; cursor: pointer; user-select: none; margin-left: 4px;
 }
 .cgi-plan-toggle input { cursor: pointer; margin: 0; }
+
+/* Plan-only items */
+.cgi-plan-add {
+  margin-left: auto; background: none; border: 1px dashed var(--cgi-border);
+  color: var(--cgi-text); opacity: 0.7; cursor: pointer; font-size: 11px;
+  padding: 2px 8px; border-radius: 5px; flex: none;
+}
+.cgi-plan-add:hover { opacity: 1; border-style: solid; }
+.cgi-plan-item { border-style: dashed; }
+.cgi-plan-item-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: transparent; border: 1.5px solid #8b5cf6;
+}
+.cgi-plan-item-note {
+  opacity: 0.5; font-size: 11px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-width: 0; flex: 1;
+}
+.cgi-plan-item-tag {
+  font-size: 10px; background: rgba(139,92,246,0.18); color: #8b5cf6;
+  padding: 1px 5px; border-radius: 4px; flex: none;
+}
+.cgi-plan-item-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.cgi-plan-iaction {
+  background: none; border: none; color: var(--cgi-text); opacity: 0.5;
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+}
+.cgi-plan-iaction:hover:not(:disabled) { opacity: 1; background: var(--cgi-border); }
+.cgi-plan-iaction:disabled { opacity: 0.3; cursor: default; }
+.cgi-plan-idelete:hover { color: #ef4444; }

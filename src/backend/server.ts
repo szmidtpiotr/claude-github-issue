@@ -253,6 +253,78 @@ async function handlePostPlanBootstrap(req: http.IncomingMessage, res: http.Serv
   }
 }
 
+async function handlePostPlanItem(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw) as { phase?: string | null; title?: string; note?: string };
+    if (!body.title?.trim()) { sendJson(res, 400, { error: 'title is required' }); return; }
+    const item = await planController.createItem(projectPath, {
+      phase: body.phase ?? null, title: body.title, note: body.note,
+    });
+    sendJson(res, 201, { ok: true, item });
+  } catch (e) {
+    sendJson(res, 500, { error: (e as Error).message ?? 'Internal error' });
+  }
+}
+
+async function handlePutPlanItem(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw) as { title?: string; note?: string; phase?: string | null };
+    const item = await planController.editItem(projectPath, id, body);
+    sendJson(res, 200, { ok: true, item });
+  } catch (e) {
+    sendJson(res, 500, { error: (e as Error).message ?? 'Internal error' });
+  }
+}
+
+async function handleDeletePlanItem(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    await planController.removeItem(projectPath, id);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: (e as Error).message ?? 'Internal error' });
+  }
+}
+
+async function handlePutPlanItemsOrder(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    const raw = await readBody(req);
+    const body = JSON.parse(raw) as { phase?: string | null; order?: string[] };
+    if (!Array.isArray(body.order)) { sendJson(res, 400, { error: 'order array required' }); return; }
+    await planController.reorderItems(projectPath, body.phase ?? null, body.order);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 500, { error: (e as Error).message ?? 'Internal error' });
+  }
+}
+
+async function handlePromotePlanItem(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    const issue = await planController.promoteItem(projectPath, id);
+    sendJson(res, 200, { ok: true, issue });
+  } catch (e) {
+    const err = e as Error & { notConfigured?: boolean };
+    if (err.notConfigured) sendJson(res, 200, { notConfigured: true, error: err.message });
+    else sendJson(res, 500, { error: err.message ?? 'Internal error' });
+  }
+}
+
 // ---- Server ----
 const server = http.createServer(async (req, res) => {
   const method = req.method ?? 'GET';
@@ -268,7 +340,7 @@ const server = http.createServer(async (req, res) => {
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     });
     res.end();
@@ -309,6 +381,39 @@ const server = http.createServer(async (req, res) => {
     // POST /plan/bootstrap
     if (method === 'POST' && pathname === '/plan/bootstrap') {
       await handlePostPlanBootstrap(req, res);
+      return;
+    }
+
+    // POST /plan/item — create plan-only item
+    if (method === 'POST' && pathname === '/plan/item') {
+      await handlePostPlanItem(req, res);
+      return;
+    }
+
+    // PUT /plan/items/order — reorder plan-only items within a phase
+    if (method === 'PUT' && pathname === '/plan/items/order') {
+      await handlePutPlanItemsOrder(req, res);
+      return;
+    }
+
+    // POST /plan/item/:id/promote — promote item to a GitHub issue
+    const promoteMatch = method === 'POST' && pathname.match(/^\/plan\/item\/([^/]+)\/promote$/);
+    if (promoteMatch && promoteMatch[1]) {
+      await handlePromotePlanItem(req, res, decodeURIComponent(promoteMatch[1]));
+      return;
+    }
+
+    // PUT /plan/item/:id — edit plan-only item
+    const putItemMatch = method === 'PUT' && pathname.match(/^\/plan\/item\/([^/]+)$/);
+    if (putItemMatch && putItemMatch[1]) {
+      await handlePutPlanItem(req, res, decodeURIComponent(putItemMatch[1]));
+      return;
+    }
+
+    // DELETE /plan/item/:id — delete plan-only item
+    const delItemMatch = method === 'DELETE' && pathname.match(/^\/plan\/item\/([^/]+)$/);
+    if (delItemMatch && delItemMatch[1]) {
+      await handleDeletePlanItem(req, res, decodeURIComponent(delItemMatch[1]));
       return;
     }
 

@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import type { GithubIssue, PlanData, PlanPhase } from './types';
+import type { GithubIssue, PlanData, PlanPhase, PlanItem } from './types';
 import { usePluginAPI } from './PluginContext';
 import { PlanCard } from './PlanCard';
+import { PlanItemCard } from './PlanItemCard';
+import { PlanItemModal } from './PlanItemModal';
 import { PlanBootstrapModal } from './PlanBootstrapModal';
 
 const POLL_INTERVAL_MS = 30_000;
@@ -11,6 +13,10 @@ interface PlanViewProps {
   onOpenIssue: (issue: GithubIssue) => void;
 }
 
+/** The phase value to send to the backend for a section (null for the "No phase" group). */
+const sectionPhase = (p: PlanPhase): string | null =>
+  (p.milestoneNumber === null && p.title === 'No phase') ? null : p.title;
+
 export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) => {
   const api = usePluginAPI();
   const [data, setData] = useState<PlanData | null>(null);
@@ -18,9 +24,12 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
   const [error, setError] = useState<string | null>(null);
   const [notConfigured, setNotConfigured] = useState(false);
   const dragFrom = useRef<{ phase: string; index: number } | null>(null);
+  const dragItemFrom = useRef<{ phase: string; index: number } | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dataRef = useRef<PlanData | null>(null);
   const [showBootstrap, setShowBootstrap] = useState(false);
+  const [itemModal, setItemModal] = useState<{ phaseTitle: string | null; item: PlanItem | null } | null>(null);
+  const [promotingId, setPromotingId] = useState<string | null>(null);
   const [hideDone, setHideDone] = useState<boolean>(() => {
     try { return localStorage.getItem('cgi-plan-hide-done') !== 'false'; } catch { return true; }
   });
@@ -55,40 +64,28 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, [fetchPlan]);
 
-  const phaseKey = (p: PlanPhase) => p.milestoneNumber === null ? '__no_phase__' : String(p.milestoneNumber);
+  const phaseKey = (p: PlanPhase) => p.milestoneNumber === null ? `np:${p.title}` : String(p.milestoneNumber);
 
-  // Compute the new order for one phase from current state, persist optimistically, PUT.
+  // ---- Issue reorder (existing behavior) ----
   const applyReorder = useCallback((phaseId: string, mutate: (issues: GithubIssue[]) => GithubIssue[]) => {
     const current = dataRef.current;
     if (!current) return;
-    let payload: { phaseTitle: string | null; order: number[] } | null = null;
+    const target = current.phases.find(p => phaseKey(p) === phaseId);
+    if (!target) return;
     const isHidden = (i: GithubIssue) => hideDoneRef.current && i.state === 'closed';
-    const phases = current.phases.map(p => {
-      if (phaseKey(p) !== phaseId) return p;
-      // Reorder operates on the VISIBLE issues (what the user sees/drags); hidden
-      // done issues keep their relative order and sink after the visible ones.
-      const visible = mutate(p.issues.filter(i => !isHidden(i)));
-      const hidden = p.issues.filter(isHidden);
-      const issues = [...visible, ...hidden];
-      payload = { phaseTitle: p.milestoneNumber === null ? null : p.title, order: issues.map(i => i.number) };
-      return { ...p, issues };
-    });
-    if (!payload) return;
-    setData({ phases });
-    const body = payload;
+    const visible = mutate(target.issues.filter(i => !isHidden(i)));
+    const hidden = target.issues.filter(isHidden);
+    const issues = [...visible, ...hidden];
+    const phaseTitle = target.milestoneNumber === null ? null : target.title;
+    const order = issues.map(i => i.number);
+    setData({ phases: current.phases.map(p => phaseKey(p) === phaseId ? { ...p, issues } : p) });
     void (async () => {
       try {
-        await api.rpc('PUT', `/plan/order?path=${encodeURIComponent(projectPath)}`, {
-          phase: body.phaseTitle,
-          order: body.order,
-        });
-      } catch {
-        void fetchPlan();
-      }
+        await api.rpc('PUT', `/plan/order?path=${encodeURIComponent(projectPath)}`, { phase: phaseTitle, order });
+      } catch { void fetchPlan(); }
     })();
   }, [api, projectPath, fetchPlan]);
 
-  // Move the card at `from` to `to` (arrow buttons pass adjacent indices).
   const reorder = (phaseId: string, from: number, to: number) => {
     applyReorder(phaseId, issues => {
       if (to < 0 || to >= issues.length) return issues;
@@ -99,8 +96,6 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
     });
   };
 
-  // Native drag drop onto a target card. Insert-before semantics; corrects the
-  // downward off-by-one (removing the source above the target shifts indices).
   const handleDrop = (phaseId: string, toIndex: number) => {
     const src = dragFrom.current;
     dragFrom.current = null;
@@ -108,6 +103,66 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
     const to = src.index < toIndex ? toIndex - 1 : toIndex;
     if (src.index === to) return;
     reorder(phaseId, src.index, to);
+  };
+
+  // ---- Plan-only item reorder ----
+  const applyItemsReorder = useCallback((phaseId: string, mutate: (items: PlanItem[]) => PlanItem[]) => {
+    const current = dataRef.current;
+    if (!current) return;
+    const target = current.phases.find(p => phaseKey(p) === phaseId);
+    if (!target) return;
+    const items = mutate(target.items.slice());
+    const phaseTitle = sectionPhase(target);
+    const order = items.map(i => i.id);
+    setData({ phases: current.phases.map(p => phaseKey(p) === phaseId ? { ...p, items } : p) });
+    void (async () => {
+      try {
+        await api.rpc('PUT', `/plan/items/order?path=${encodeURIComponent(projectPath)}`, { phase: phaseTitle, order });
+      } catch { void fetchPlan(); }
+    })();
+  }, [api, projectPath, fetchPlan]);
+
+  const reorderItem = (phaseId: string, from: number, to: number) => {
+    applyItemsReorder(phaseId, items => {
+      if (to < 0 || to >= items.length) return items;
+      const next = items.slice();
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  };
+
+  const handleItemDrop = (phaseId: string, toIndex: number) => {
+    const src = dragItemFrom.current;
+    dragItemFrom.current = null;
+    if (!src || src.phase !== phaseId) return;
+    const to = src.index < toIndex ? toIndex - 1 : toIndex;
+    if (src.index === to) return;
+    reorderItem(phaseId, src.index, to);
+  };
+
+  const deleteItem = async (item: PlanItem) => {
+    if (item.note.trim() && !window.confirm(`Delete plan task "${item.title}"?`)) return;
+    try {
+      await api.rpc('DELETE', `/plan/item/${encodeURIComponent(item.id)}?path=${encodeURIComponent(projectPath)}`);
+      void fetchPlan();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete plan item');
+    }
+  };
+
+  const promoteItem = async (item: PlanItem) => {
+    setPromotingId(item.id);
+    try {
+      const res = await api.rpc('POST', `/plan/item/${encodeURIComponent(item.id)}/promote?path=${encodeURIComponent(projectPath)}`) as
+        { ok?: boolean; error?: string; notConfigured?: boolean };
+      if (res.error) setError(res.error);
+      await fetchPlan();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to promote plan item');
+    } finally {
+      setPromotingId(null);
+    }
   };
 
   if (notConfigured) return <div className="cgi-center"><div style={{ opacity: 0.5 }}>GitHub not configured. Open the ⚙ settings on the Issues Board tab.</div></div>;
@@ -131,14 +186,20 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
         data.phases.map(phase => {
           const pct = phase.total > 0 ? Math.round((phase.closed / phase.total) * 100) : 0;
           const visibleIssues = hideDone ? phase.issues.filter(i => i.state !== 'closed') : phase.issues;
-          // Hide a phase whose issues are all done when "Hide done" is on, unless it has none at all.
-          if (hideDone && phase.total > 0 && visibleIssues.length === 0) return null;
+          // Hide a phase only if it has no visible issues AND no plan-only items.
+          if (hideDone && phase.total > 0 && visibleIssues.length === 0 && phase.items.length === 0) return null;
+          const pid = phaseKey(phase);
           return (
-            <section key={phaseKey(phase)} className="cgi-plan-phase">
+            <section key={pid} className="cgi-plan-phase">
               <header className="cgi-plan-phase-head">
                 <span className="cgi-plan-phase-title">{phase.title}</span>
                 <span className="cgi-plan-phase-count">{phase.closed}/{phase.total}</span>
                 <span className="cgi-plan-progress"><span className="cgi-plan-progress-bar" style={{ width: `${pct}%` }} /></span>
+                <button
+                  className="cgi-plan-add"
+                  title="Add a planned task to this phase"
+                  onClick={() => setItemModal({ phaseTitle: sectionPhase(phase), item: null })}
+                >+ Add task</button>
               </header>
               <div className="cgi-plan-list">
                 {visibleIssues.map((issue, idx) => (
@@ -148,17 +209,43 @@ export const PlanView: React.FC<PlanViewProps> = ({ projectPath, onOpenIssue }) 
                     index={idx}
                     count={visibleIssues.length}
                     onOpen={onOpenIssue}
-                    onMoveUp={() => reorder(phaseKey(phase), idx, idx - 1)}
-                    onMoveDown={() => reorder(phaseKey(phase), idx, idx + 1)}
-                    onDragStart={() => { dragFrom.current = { phase: phaseKey(phase), index: idx }; }}
+                    onMoveUp={() => reorder(pid, idx, idx - 1)}
+                    onMoveDown={() => reorder(pid, idx, idx + 1)}
+                    onDragStart={() => { dragFrom.current = { phase: pid, index: idx }; }}
                     onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => handleDrop(phaseKey(phase), idx)}
+                    onDrop={() => handleDrop(pid, idx)}
+                  />
+                ))}
+                {phase.items.map((item, idx) => (
+                  <PlanItemCard
+                    key={item.id}
+                    item={item}
+                    index={idx}
+                    count={phase.items.length}
+                    promoting={promotingId === item.id}
+                    onEdit={() => setItemModal({ phaseTitle: sectionPhase(phase), item })}
+                    onDelete={() => void deleteItem(item)}
+                    onPromote={() => void promoteItem(item)}
+                    onMoveUp={() => reorderItem(pid, idx, idx - 1)}
+                    onMoveDown={() => reorderItem(pid, idx, idx + 1)}
+                    onDragStart={() => { dragItemFrom.current = { phase: pid, index: idx }; }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => handleItemDrop(pid, idx)}
                   />
                 ))}
               </div>
             </section>
           );
         })
+      )}
+      {itemModal && (
+        <PlanItemModal
+          projectPath={projectPath}
+          phaseTitle={itemModal.phaseTitle}
+          existing={itemModal.item}
+          onClose={() => setItemModal(null)}
+          onSaved={() => { setItemModal(null); void fetchPlan(); }}
+        />
       )}
       {showBootstrap && (
         <PlanBootstrapModal
