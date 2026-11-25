@@ -117,10 +117,134 @@ async function createMilestone(token, owner, repo, title) {
     { title }
   );
 }
+async function listLabels(token, owner, repo) {
+  const all = [];
+  for (let page = 1; page <= 10; page++) {
+    const batch = await githubFetch(
+      token,
+      "GET",
+      `/repos/${owner}/${repo}/labels?per_page=100&page=${page}`
+    );
+    all.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return all;
+}
 
 // src/backend/config.service.ts
 var import_path = __toESM(require("path"));
 var import_fs = require("fs");
+
+// src/shared/labels.ts
+var STATUS_LABEL_NAMES = [
+  "in-progress",
+  "review",
+  "blocked",
+  "need-testing",
+  "deferred",
+  "cancelled"
+];
+var PRIORITY_LABEL_PATTERNS = [
+  // high
+  "p0",
+  "critical",
+  "blocker",
+  "urgent",
+  "security",
+  "vulnerability",
+  "crash",
+  "data-loss",
+  "high",
+  "priority:high",
+  "high-priority",
+  "bug",
+  // medium
+  "p1",
+  "important",
+  "medium",
+  "priority:medium",
+  "medium-priority",
+  // low
+  "p2",
+  "p3",
+  "low",
+  "priority:low",
+  "low-priority",
+  "nice-to-have",
+  "minor",
+  "enhancement",
+  "feature",
+  "improvement",
+  "wontfix",
+  "documentation",
+  "docs"
+];
+var GITHUB_DEFAULT_LABELS = [
+  "accessibility",
+  "bug",
+  "documentation",
+  "duplicate",
+  "enhancement",
+  "good first issue",
+  "help wanted",
+  "invalid",
+  "question",
+  "wontfix"
+];
+var STATUS_SET = new Set(STATUS_LABEL_NAMES);
+var DEFAULT_SET = new Set(GITHUB_DEFAULT_LABELS);
+function labelRole(name) {
+  const n = name.trim().toLowerCase();
+  if (STATUS_SET.has(n)) return "status";
+  if (PRIORITY_LABEL_PATTERNS.some((p) => n === p || n.startsWith("priority") || /^p[0-9]$/.test(n))) {
+    return "priority";
+  }
+  if (DEFAULT_SET.has(n)) return "default";
+  return "other";
+}
+function normalizeLabels(raw) {
+  let list = [];
+  if (Array.isArray(raw)) list = raw;
+  else if (typeof raw === "string") list = raw.split(",");
+  else return [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const v of list) {
+    if (typeof v !== "string") continue;
+    const name = v.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+function issueMatchesLabels(issue, projectLabels) {
+  if (projectLabels.length === 0) return true;
+  const wanted = new Set(projectLabels.map((l) => l.toLowerCase()));
+  return (issue.labels ?? []).some((l) => {
+    const name = typeof l === "string" ? l : l?.name;
+    return typeof name === "string" && wanted.has(name.toLowerCase());
+  });
+}
+function filterIssuesByLabels(issues, projectLabels) {
+  if (projectLabels.length === 0) return issues;
+  return issues.filter((i) => issueMatchesLabels(i, projectLabels));
+}
+function withProjectLabels(labels, projectLabels) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const l of [...labels ?? [], ...projectLabels]) {
+    const key = l.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(l);
+  }
+  return out;
+}
+
+// src/backend/config.service.ts
 var SYNC_FILE = ".GitHubBoard/github-sync.json";
 var TASKMASTER_SYNC_FILE = ".taskmaster/github-sync.json";
 async function readConfigFile(filePath) {
@@ -133,7 +257,8 @@ async function readConfigFile(filePath) {
       owner: parsed.owner,
       repo: parsed.repo,
       enabled: parsed.enabled !== false,
-      anthropicKey: parsed.anthropicKey
+      anthropicKey: parsed.anthropicKey,
+      labels: normalizeLabels(parsed.labels)
     };
   } catch {
     return null;
@@ -148,7 +273,17 @@ async function writeConfig(projectPath, config) {
   const dir = import_path.default.join(projectPath, ".GitHubBoard");
   await import_fs.promises.mkdir(dir, { recursive: true });
   const filePath = import_path.default.join(projectPath, SYNC_FILE);
-  await import_fs.promises.writeFile(filePath, JSON.stringify(config, null, 2), "utf8");
+  let existing = {};
+  try {
+    const parsed = JSON.parse(await import_fs.promises.readFile(filePath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed;
+  } catch {
+  }
+  const out = { ...existing, ...config };
+  if (!config.anthropicKey) delete out.anthropicKey;
+  if (config.labels.length > 0) out.labels = config.labels;
+  else delete out.labels;
+  await import_fs.promises.writeFile(filePath, JSON.stringify(out, null, 2), "utf8");
 }
 
 // src/backend/cache.ts
@@ -215,21 +350,49 @@ function issueToColumnId(issue) {
 function categorizeIssues(issues) {
   return issues.map((issue) => ({ ...issue, columnId: issueToColumnId(issue) }));
 }
-async function fetchIssues(projectPath) {
+async function fetchIssues(projectPath, scope = "project") {
   const config = await readConfig(projectPath);
   if (!config?.token || !config?.owner || !config?.repo) {
     const err = new Error("GitHub not configured for this project");
     err.notConfigured = true;
     throw err;
   }
-  const cacheKey = `issues:${config.owner}/${config.repo}`;
+  const all = await getCachedRepoIssues(config);
+  const projectLabels = config.labels;
+  const applied = projectLabels.length > 0 && scope === "project" ? "project" : "repo";
+  const issues = applied === "project" ? filterIssuesByLabels(all, projectLabels) : all;
+  return {
+    issues,
+    columns: buildColumns(),
+    owner: config.owner,
+    repo: config.repo,
+    projectLabels,
+    scope: applied,
+    repoTotal: all.length
+  };
+}
+async function fetchRepoLabels(projectPath, override) {
+  const config = await readConfig(projectPath);
+  const token = override?.token?.trim() || config?.token;
+  const owner = override?.owner?.trim() || config?.owner;
+  const repo = override?.repo?.trim() || config?.repo;
+  if (!token || !owner || !repo) {
+    const err = new Error("GitHub not configured for this project");
+    err.notConfigured = true;
+    throw err;
+  }
+  const cacheKey = `labels:${owner}/${repo}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const raw = await listIssues(config.token, config.owner, config.repo, "all");
-  const issues = categorizeIssues(raw);
-  const result = { issues, columns: buildColumns(), owner: config.owner, repo: config.repo };
-  cacheSet(cacheKey, result, ISSUES_TTL);
-  return result;
+  const raw = await listLabels(token, owner, repo);
+  const labels = raw.map((l) => ({
+    name: l.name,
+    color: l.color,
+    description: l.description ?? null,
+    role: labelRole(l.name)
+  }));
+  cacheSet(cacheKey, labels, ISSUES_TTL);
+  return labels;
 }
 async function getCachedRepoIssues(config) {
   const cacheKey = `issues:${config.owner}/${config.repo}`;
@@ -272,7 +435,8 @@ async function addComment(projectPath, issueNumber, body) {
 async function createIssue2(projectPath, title, body, labels) {
   const config = await readConfig(projectPath);
   if (!config?.token || !config?.owner || !config?.repo) throw new Error("Not configured");
-  const issue = await createIssue(config.token, config.owner, config.repo, title, body, labels);
+  const finalLabels = withProjectLabels(labels, config.labels);
+  const issue = await createIssue(config.token, config.owner, config.repo, title, body, finalLabels);
   cacheDeletePrefix(`issues:${config.owner}/${config.repo}`);
   return issue;
 }
@@ -505,12 +669,14 @@ async function requireConfig(projectPath) {
 }
 async function buildPlan(projectPath) {
   const config = await requireConfig(projectPath);
-  const [issues, milestones, store, phaseOrder] = await Promise.all([
+  const [allIssues, milestones, store, phaseOrder] = await Promise.all([
     getCachedRepoIssues(config),
     getCachedMilestones(config),
     readPlan(projectPath),
     readPhaseOrder(projectPath)
   ]);
+  const filtered = config.labels.length > 0;
+  const issues = filterIssuesByLabels(allIssues, config.labels);
   const groups = /* @__PURE__ */ new Map();
   for (const issue of issues) {
     const key = issue.milestone ? String(issue.milestone.number) : NO_PHASE;
@@ -531,6 +697,7 @@ async function buildPlan(projectPath) {
   const phases = [];
   for (const m of milestones) {
     const arr = sortGroup(groups.get(String(m.number)) ?? []);
+    if (filtered && arr.length === 0) continue;
     phases.push({
       title: m.title,
       milestoneNumber: m.number,
@@ -655,7 +822,8 @@ async function handleGetIssues(req, res) {
     return;
   }
   try {
-    const result = await fetchIssues(projectPath);
+    const scope = query["scope"] === "repo" ? "repo" : "project";
+    const result = await fetchIssues(projectPath, scope);
     sendJson(res, 200, result);
   } catch (e) {
     const err = e;
@@ -737,12 +905,29 @@ async function handleGetConfig(req, res) {
         owner: config.owner,
         repo: config.repo,
         hasToken: Boolean(config.token),
-        hasAnthropicKey: Boolean(config.anthropicKey)
+        hasAnthropicKey: Boolean(config.anthropicKey),
+        labels: config.labels
       });
     }
   } catch (e) {
     const err = e;
     sendJson(res, 500, { error: err.message ?? "Internal error" });
+  }
+}
+async function handleGetLabels(req, res) {
+  const query = parseQuery(req.url ?? "");
+  const projectPath = query["path"] ?? "";
+  if (!projectPath) {
+    sendJson(res, 400, { error: "path query parameter required" });
+    return;
+  }
+  try {
+    const labels = await fetchRepoLabels(projectPath, { owner: query["owner"], repo: query["repo"] });
+    sendJson(res, 200, { labels });
+  } catch (e) {
+    const err = e;
+    if (err.notConfigured) sendJson(res, 200, { notConfigured: true, labels: [], error: err.message });
+    else sendJson(res, 500, { error: err.message ?? "Internal error" });
   }
 }
 async function handleGetPlan(req, res) {
@@ -864,6 +1049,10 @@ var server = import_http.default.createServer(async (req, res) => {
       await handleGetIssues(req, res);
       return;
     }
+    if (method === "GET" && pathname === "/labels") {
+      await handleGetLabels(req, res);
+      return;
+    }
     if (method === "GET" && pathname === "/config") {
       await handleGetConfig(req, res);
       return;
@@ -934,17 +1123,20 @@ var server = import_http.default.createServer(async (req, res) => {
       try {
         const raw = await readBody(req);
         const body = JSON.parse(raw);
-        if (!body.token?.trim() || !body.owner?.trim() || !body.repo?.trim()) {
+        const existing = await readConfig(projectPath);
+        const token = body.token?.trim() || existing?.token || "";
+        if (!token || !body.owner?.trim() || !body.repo?.trim()) {
           sendJson(res, 400, { error: "token, owner, and repo are required" });
           return;
         }
-        const existing = await readConfig(projectPath);
         const config = {
-          token: body.token.trim(),
+          token,
           owner: body.owner.trim(),
           repo: body.repo.trim(),
           enabled: body.enabled !== false,
-          anthropicKey: body.anthropicKey?.trim() || existing?.anthropicKey || void 0
+          anthropicKey: body.anthropicKey?.trim() || existing?.anthropicKey || void 0,
+          // Omitted `labels` keeps the current filter; [] clears it.
+          labels: body.labels === void 0 ? existing?.labels ?? [] : normalizeLabels(body.labels)
         };
         await writeConfig(projectPath, config);
         sendJson(res, 200, { ok: true });

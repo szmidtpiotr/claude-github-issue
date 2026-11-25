@@ -15,7 +15,46 @@ First, find and read `.GitHubBoard/github-sync.json` in the current project:
 cat .GitHubBoard/github-sync.json 2>/dev/null || find . -name "github-sync.json" -path "*GitHubBoard*" 2>/dev/null | head -1 | xargs cat
 ```
 
-Extract: `token`, `owner`, `repo`. If missing → tell user to configure in the GitHub Issues Board tab (click the ⚙ gear icon).
+Extract: `token`, `owner`, `repo`, and the optional `labels` (project filter). If token/owner/repo are missing → tell user to configure in the GitHub Issues Board tab (click the ⚙ gear icon).
+
+**Never print the token** (no `cat` of the whole file in output shown to the user, no echoing `$TOKEN`). Read the fields with a script instead:
+
+```bash
+CFG=.GitHubBoard/github-sync.json
+OWNER=$(python3 -c "import json;print(json.load(open('$CFG'))['owner'])")
+REPO=$(python3 -c "import json;print(json.load(open('$CFG'))['repo'])")
+# Project labels, comma-separated ("" = no filter, whole repo)
+PROJECT_LABELS=$(python3 -c "import json;d=json.load(open('$CFG'));l=d.get('labels') or [];l=[l] if isinstance(l,str) else l;print(','.join(x.strip() for x in l if isinstance(x,str) and x.strip()))")
+```
+
+### Project label filter (`labels`)
+
+Several projects can share one GitHub repo and tell their issues apart by a **project
+label** (e.g. `project-a`, `project-b`). When `labels` is set in `github-sync.json`, this
+project owns **only the issues carrying at least one of those labels** (OR, case-insensitive).
+
+When `PROJECT_LABELS` is non-empty, EVERY operation is scoped to the project:
+- **List**: show only issues with a project label. Filter client-side (the GitHub
+  `labels=` query parameter means AND, not OR):
+  ```bash
+  curl -s $AUTH "$BASE/repos/$OWNER/$REPO/issues?state=open&per_page=100" | python3 -c "
+  import json,sys,os
+  want={l.lower() for l in os.environ.get('PROJECT_LABELS','').split(',') if l}
+  for i in json.load(sys.stdin):
+      if 'pull_request' in i: continue
+      names={l['name'].lower() for l in i['labels']}
+      if not want or names & want: print(i['number'], i['title'])"
+  ```
+  (export `PROJECT_LABELS` first). With `gh`: `gh issue list --repo $OWNER/$REPO --label <one-label>` works for a single project label.
+- **Move / update / comment**: before touching issue `#N`, check it carries a project
+  label. If it doesn't, stop and tell the user it belongs to another project (or to no
+  project) — act only if they confirm.
+- **Create**: always add the project label(s) to a new issue (`"labels": [...]`, or
+  `gh issue create --label <project-label>`).
+- **Plan ordering**: rank and write `order` only for the project's issues (see below).
+- **Never** add or remove a project label as part of a status move — project labels and
+  status labels are separate. Keep every non-status label exactly as it was.
+- No `labels` field (or empty) → no filter, the whole repo is the project (old behaviour).
 
 Set shell variables:
 ```bash
@@ -191,6 +230,10 @@ Edit `.GitHubBoard/plan.json`: assign consecutive `order` values (0, 1, 2, …) 
 in the phase, in the desired top-to-bottom sequence. Create the file if missing.
 
 ### Order a whole phase list "by urgency" (the common request)
+
+With a project filter (`labels`), the Plan tab shows only the project's issues and hides
+milestones that hold none of them — so rank only those issues (the script below does it).
+
 When the user asks to "ułóż plan wg pilności" / "order the plan", regenerate the store
 deterministically — group every issue by its milestone, sort each group, write `order` 0..n.
 A good default ranking (matches the board's Priority sort):
@@ -201,6 +244,10 @@ R = "OWNER/REPO"   # from github-sync.json
 issues = json.loads(subprocess.check_output(
     ["gh","issue","list","--repo",R,"--state","all","--limit","400",
      "--json","number,title,labels,milestone,state"]))
+cfg = json.load(open(".GitHubBoard/github-sync.json"))
+want = {l.lower() for l in (cfg.get("labels") or [])}       # project filter ([] = whole repo)
+if want:
+    issues = [i for i in issues if want & {l["name"].lower() for l in i["labels"]}]
 PR = {"priority:high":0, "priority:medium":1, "priority:low":2}
 def rank(i):
     labs = [l["name"] for l in i["labels"]]
@@ -211,13 +258,16 @@ groups = {}
 for i in issues:
     t = (i["milestone"] or {}).get("title")
     if t: groups.setdefault(t, []).append(i)
-store = {}
+try: old = json.load(open(".GitHubBoard/plan.json"))
+except FileNotFoundError: old = {}
+# Keep entries for issues outside the project untouched; rewrite only this project's.
+mine = {str(i["number"]) for i in issues}
+store = {k: v for k, v in old.items() if k not in mine and k != "__phaseOrder__"}
 for title, arr in groups.items():
     arr.sort(key=rank)
     for idx, i in enumerate(arr):
         store[str(i["number"])] = {"order": idx, "phase": title}
-old = json.load(open(".GitHubBoard/plan.json"))          # preserve manual phase order
-if old.get("__phaseOrder__"): store["__phaseOrder__"] = old["__phaseOrder__"]
+if old.get("__phaseOrder__"): store["__phaseOrder__"] = old["__phaseOrder__"]  # keep manual phase order
 json.dump(store, open(".GitHubBoard/plan.json","w"), indent=2, ensure_ascii=False)
 ```
 
@@ -238,3 +288,14 @@ gh api repos/$OWNER/$REPO/milestones -f title="FAZA L"
 - **Milestone = phase** (e.g. "FAZA L"). One milestone per phase.
 - **Priority/bug = labels** (`bug`, `P0`..`P5`) — same as the board.
 - **Done = closed**, status = labels — unchanged from the board mapping above.
+
+## TaskMaster sync — same project filter
+
+The board also reads `.taskmaster/github-sync.json` as a fallback config, and the
+`labels` field works there too. When syncing GitHub issues ↔ TaskMaster tasks:
+- **GitHub → TaskMaster**: import/match only issues that carry a project label
+  (same OR rule as above). Issues of other projects in a shared repo are skipped.
+- **TaskMaster → GitHub**: every issue created for a task gets the project label(s),
+  in addition to its type label (`enhancement`, `bug`, …).
+- **Status sync** (start / done): only for issues of this project; for an issue without
+  a project label, ask before changing it.

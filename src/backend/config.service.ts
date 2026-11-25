@@ -1,5 +1,6 @@
 import path from 'path';
 import { promises as fs } from 'fs';
+import { normalizeLabels } from '../shared/labels';
 
 const SYNC_FILE = '.GitHubBoard/github-sync.json';
 // Fallback: TaskMaster stores the same GitHub credentials here. Reading it
@@ -13,13 +14,18 @@ export interface GithubConfig {
   repo: string;
   enabled: boolean;
   anthropicKey?: string;
+  /**
+   * Optional project filter. When non-empty, the board, the Plan tab and new issues
+   * are scoped to issues carrying at least one of these labels. Missing/empty = whole repo.
+   */
+  labels: string[];
 }
 
 async function readConfigFile(filePath: string): Promise<GithubConfig | null> {
   try {
     const content = await fs.readFile(filePath, 'utf8');
     // TaskMaster files carry extra fields (webhookSecret, lastSync) — ignored here.
-    const parsed = JSON.parse(content) as Partial<GithubConfig>;
+    const parsed = JSON.parse(content) as Partial<GithubConfig> & { labels?: unknown };
     if (!parsed.token || !parsed.owner || !parsed.repo) return null;
     return {
       token: parsed.token,
@@ -27,6 +33,7 @@ async function readConfigFile(filePath: string): Promise<GithubConfig | null> {
       repo: parsed.repo,
       enabled: parsed.enabled !== false,
       anthropicKey: parsed.anthropicKey,
+      labels: normalizeLabels(parsed.labels),
     };
   } catch {
     return null;
@@ -47,5 +54,16 @@ export async function writeConfig(projectPath: string, config: GithubConfig): Pr
   const dir = path.join(projectPath, '.GitHubBoard');
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(projectPath, SYNC_FILE);
-  await fs.writeFile(filePath, JSON.stringify(config, null, 2), 'utf8');
+  // Keep fields this plugin doesn't know about (other tools may share the file).
+  let existing: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(await fs.readFile(filePath, 'utf8')) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+  } catch { /* no file yet */ }
+  const out: Record<string, unknown> = { ...existing, ...config };
+  if (!config.anthropicKey) delete out.anthropicKey;
+  // Write `labels` only when a filter is set, so unfiltered configs stay byte-compatible.
+  if (config.labels.length > 0) out.labels = config.labels;
+  else delete out.labels;
+  await fs.writeFile(filePath, JSON.stringify(out, null, 2), 'utf8');
 }

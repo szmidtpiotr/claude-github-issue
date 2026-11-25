@@ -2,6 +2,11 @@ import type { GithubIssue, GithubColumn } from '../../src/frontend/types';
 import * as github from './github.service';
 import * as configService from './config.service';
 import { cacheGet, cacheSet, cacheDeletePrefix } from './cache';
+import { filterIssuesByLabels, withProjectLabels, labelRole } from '../shared/labels';
+import type { LabelRole } from '../shared/labels';
+
+/** 'project' = only issues with the project labels (if any set); 'repo' = everything. */
+export type IssueScope = 'project' | 'repo';
 
 const ISSUES_TTL = 60_000;    // 60s
 const COMMENTS_TTL = 30_000;  // 30s
@@ -48,12 +53,20 @@ export function categorizeIssues(issues: GithubIssue[]): IssueWithColumn[] {
   return issues.map(issue => ({ ...issue, columnId: issueToColumnId(issue) }));
 }
 
-export async function fetchIssues(projectPath: string): Promise<{
+export interface IssuesResult {
   issues: IssueWithColumn[];
   columns: GithubColumn[];
   owner: string;
   repo: string;
-}> {
+  /** Project filter from github-sync.json ([] = none). */
+  projectLabels: string[];
+  /** Scope actually applied (always 'repo' when no project labels are set). */
+  scope: IssueScope;
+  /** Number of issues in the whole repo, before the project filter. */
+  repoTotal: number;
+}
+
+export async function fetchIssues(projectPath: string, scope: IssueScope = 'project'): Promise<IssuesResult> {
   const config = await configService.readConfig(projectPath);
   if (!config?.token || !config?.owner || !config?.repo) {
     const err = new Error('GitHub not configured for this project') as Error & { notConfigured: boolean };
@@ -61,15 +74,56 @@ export async function fetchIssues(projectPath: string): Promise<{
     throw err;
   }
 
-  const cacheKey = `issues:${config.owner}/${config.repo}`;
-  const cached = cacheGet(cacheKey) as { issues: IssueWithColumn[]; columns: GithubColumn[]; owner: string; repo: string } | null;
-  if (cached) return cached;
+  // The cache always holds the WHOLE repo (one GitHub fetch serves every project that
+  // shares the repo and both scopes); the project filter is applied afterwards.
+  const all = await getCachedRepoIssues(config);
+  const projectLabels = config.labels;
+  const applied: IssueScope = projectLabels.length > 0 && scope === 'project' ? 'project' : 'repo';
+  const issues = applied === 'project' ? filterIssuesByLabels(all, projectLabels) : all;
+  return {
+    issues,
+    columns: buildColumns(),
+    owner: config.owner,
+    repo: config.repo,
+    projectLabels,
+    scope: applied,
+    repoTotal: all.length,
+  };
+}
 
-  const raw = await github.listIssues(config.token, config.owner, config.repo, 'all');
-  const issues = categorizeIssues(raw);
-  const result = { issues, columns: buildColumns(), owner: config.owner, repo: config.repo };
-  cacheSet(cacheKey, result, ISSUES_TTL);
-  return result;
+export interface RepoLabel {
+  name: string;
+  color: string;
+  description: string | null;
+  role: LabelRole;
+}
+
+/** All labels of the configured repo, tagged with the role the plugin gives them. */
+export async function fetchRepoLabels(
+  projectPath: string,
+  override?: { owner?: string; repo?: string; token?: string }
+): Promise<RepoLabel[]> {
+  const config = await configService.readConfig(projectPath);
+  const token = override?.token?.trim() || config?.token;
+  const owner = override?.owner?.trim() || config?.owner;
+  const repo = override?.repo?.trim() || config?.repo;
+  if (!token || !owner || !repo) {
+    const err = new Error('GitHub not configured for this project') as Error & { notConfigured: boolean };
+    err.notConfigured = true;
+    throw err;
+  }
+  const cacheKey = `labels:${owner}/${repo}`;
+  const cached = cacheGet(cacheKey) as RepoLabel[] | null;
+  if (cached) return cached;
+  const raw = await github.listLabels(token, owner, repo);
+  const labels = raw.map(l => ({
+    name: l.name,
+    color: l.color,
+    description: l.description ?? null,
+    role: labelRole(l.name),
+  }));
+  cacheSet(cacheKey, labels, ISSUES_TTL);
+  return labels;
 }
 
 /**
@@ -138,7 +192,10 @@ export async function createIssue(
 ): Promise<GithubIssue> {
   const config = await configService.readConfig(projectPath);
   if (!config?.token || !config?.owner || !config?.repo) throw new Error('Not configured');
-  const issue = await github.createIssue(config.token, config.owner, config.repo, title, body, labels);
+  // With a project filter set, a new issue always gets the project label(s), so it
+  // shows up on this project's board (and not as an orphan in the shared repo).
+  const finalLabels = withProjectLabels(labels, config.labels);
+  const issue = await github.createIssue(config.token, config.owner, config.repo, title, body, finalLabels);
   cacheDeletePrefix(`issues:${config.owner}/${config.repo}`);
   return issue;
 }

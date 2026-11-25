@@ -8,6 +8,7 @@ import {
 } from './github.service';
 import type { GithubIssue } from '../../src/frontend/types';
 import type { PlanData, PlanPhase } from '../../src/frontend/types';
+import { filterIssuesByLabels } from '../shared/labels';
 
 const NO_PHASE = '__no_phase__';
 
@@ -26,12 +27,16 @@ export async function buildPlan(projectPath: string): Promise<PlanData> {
   const config = await requireConfig(projectPath);
   // Reuse the board's cached issues + a cached milestone list so the Plan tab loads
   // instantly when the board was already fetched (and across its 30s polling).
-  const [issues, milestones, store, phaseOrder] = await Promise.all([
+  const [allIssues, milestones, store, phaseOrder] = await Promise.all([
     issuesService.getCachedRepoIssues(config),
     issuesService.getCachedMilestones(config),
     planService.readPlan(projectPath),
     planService.readPhaseOrder(projectPath),
   ]);
+
+  // Project filter: the Plan only ever shows this project's issues.
+  const filtered = config.labels.length > 0;
+  const issues = filterIssuesByLabels(allIssues, config.labels);
 
   // Group issues by milestone number (or NO_PHASE).
   const groups = new Map<string, GithubIssue[]>();
@@ -59,6 +64,9 @@ export async function buildPlan(projectPath: string): Promise<PlanData> {
   // One section per milestone, in GitHub milestone order.
   for (const m of milestones) {
     const arr = sortGroup(groups.get(String(m.number)) ?? []);
+    // In a repo shared by several projects, milestones belong to whichever project
+    // uses them — hide phases that hold none of this project's issues.
+    if (filtered && arr.length === 0) continue;
     phases.push({
       title: m.title,
       milestoneNumber: m.number,

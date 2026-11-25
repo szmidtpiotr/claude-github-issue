@@ -6,6 +6,7 @@ import * as issuesService from './issues.service';
 import * as configService from './config.service';
 import { prioritizeIssues } from './ai.service';
 import * as planController from './plan.controller';
+import { normalizeLabels } from '../shared/labels';
 
 // ---- Auto-install /github-task skill ----
 function installSkill(): void {
@@ -82,7 +83,8 @@ async function handleGetIssues(req: http.IncomingMessage, res: http.ServerRespon
     return;
   }
   try {
-    const result = await issuesService.fetchIssues(projectPath);
+    const scope: issuesService.IssueScope = query['scope'] === 'repo' ? 'repo' : 'project';
+    const result = await issuesService.fetchIssues(projectPath, scope);
     sendJson(res, 200, result);
   } catch (e) {
     const err = e as Error & { notConfigured?: boolean };
@@ -190,11 +192,28 @@ async function handleGetConfig(
         repo: config.repo,
         hasToken: Boolean(config.token),
         hasAnthropicKey: Boolean(config.anthropicKey),
+        labels: config.labels,
       });
     }
   } catch (e) {
     const err = e as Error;
     sendJson(res, 500, { error: err.message ?? 'Internal error' });
+  }
+}
+
+async function handleGetLabels(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const query = parseQuery(req.url ?? '');
+  const projectPath = query['path'] ?? '';
+  if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
+  try {
+    // owner/repo may be overridden so Settings can list labels of a repo typed but not saved yet;
+    // the token always comes from the saved config (never passed in a URL).
+    const labels = await issuesService.fetchRepoLabels(projectPath, { owner: query['owner'], repo: query['repo'] });
+    sendJson(res, 200, { labels });
+  } catch (e) {
+    const err = e as Error & { notConfigured?: boolean };
+    if (err.notConfigured) sendJson(res, 200, { notConfigured: true, labels: [], error: err.message });
+    else sendJson(res, 500, { error: err.message ?? 'Internal error' });
   }
 }
 
@@ -301,6 +320,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // GET /labels — repo labels with their role (status / priority / default / other)
+    if (method === 'GET' && pathname === '/labels') {
+      await handleGetLabels(req, res);
+      return;
+    }
+
     // GET /config
     if (method === 'GET' && pathname === '/config') {
       await handleGetConfig(req, res);
@@ -382,18 +407,24 @@ const server = http.createServer(async (req, res) => {
       if (!projectPath) { sendJson(res, 400, { error: 'path query parameter required' }); return; }
       try {
         const raw = await readBody(req);
-        const body = JSON.parse(raw) as { token?: string; owner?: string; repo?: string; enabled?: boolean; anthropicKey?: string };
-        if (!body.token?.trim() || !body.owner?.trim() || !body.repo?.trim()) {
+        const body = JSON.parse(raw) as {
+          token?: string; owner?: string; repo?: string; enabled?: boolean; anthropicKey?: string; labels?: unknown;
+        };
+        const existing = await configService.readConfig(projectPath);
+        // Token may be left blank to keep the saved one (Settings never receives secrets back).
+        const token = body.token?.trim() || existing?.token || '';
+        if (!token || !body.owner?.trim() || !body.repo?.trim()) {
           sendJson(res, 400, { error: 'token, owner, and repo are required' });
           return;
         }
-        const existing = await configService.readConfig(projectPath);
         const config: configService.GithubConfig = {
-          token: body.token.trim(),
+          token,
           owner: body.owner.trim(),
           repo: body.repo.trim(),
           enabled: body.enabled !== false,
           anthropicKey: body.anthropicKey?.trim() || existing?.anthropicKey || undefined,
+          // Omitted `labels` keeps the current filter; [] clears it.
+          labels: body.labels === undefined ? (existing?.labels ?? []) : normalizeLabels(body.labels),
         };
         await configService.writeConfig(projectPath, config);
         sendJson(res, 200, { ok: true });

@@ -11,10 +11,19 @@ import { SubscriptionPriorityModal } from './SubscriptionPriorityModal';
 import { ConfigBanner } from './ConfigBanner';
 import { SettingsModal } from './SettingsModal';
 import { PlanView } from './PlanView';
+import { labelRole } from '../shared/labels';
 
 const POLL_INTERVAL_MS = 30_000;
 const STORAGE_KEY = 'cgi-collapsed-columns';
 const TAB_KEY = 'cgi-active-tab';
+const SCOPE_KEY_PREFIX = 'cgi-scope:';
+const NO_PROJECT = '__none__';
+type Scope = 'project' | 'repo';
+
+function loadScope(projectPath: string | undefined): Scope {
+  if (!projectPath) return 'project';
+  try { return localStorage.getItem(SCOPE_KEY_PREFIX + projectPath) === 'repo' ? 'repo' : 'project'; } catch { return 'project'; }
+}
 const SORT_LABELS: Record<SortOption, string> = {
   number: 'Number',
   updated: 'Updated',
@@ -63,6 +72,11 @@ export const App: React.FC = () => {
     try { localStorage.setItem(TAB_KEY, tab); } catch {}
   };
 
+  // Project-label filter: scope "this project" vs "whole repo" (per project, remembered)
+  const [scope, setScope] = useState<Scope>(() => loadScope(api.context.project?.path));
+  const [projectLabels, setProjectLabels] = useState<string[]>([]);
+  const [repoChip, setRepoChip] = useState<string>('all'); // label name, 'all' or NO_PROJECT
+
   // Filter/sort state
   const [searchText, setSearchText] = useState('');
   const [activePriority, setActivePriority] = useState<'all' | PriorityLevel>('all');
@@ -91,8 +105,11 @@ export const App: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.rpc('GET', `/issues?path=${encodeURIComponent(project.path)}`);
-      const d = res as { issues?: GithubIssue[]; columns?: IssuesData['columns']; error?: string; notConfigured?: boolean };
+      const res = await api.rpc('GET', `/issues?path=${encodeURIComponent(project.path)}&scope=${scope}`);
+      const d = res as {
+        issues?: GithubIssue[]; columns?: IssuesData['columns']; error?: string; notConfigured?: boolean;
+        projectLabels?: string[];
+      };
       if (d.notConfigured || d.error?.includes('not configured')) {
         setNotConfigured(true);
         setData(null);
@@ -100,6 +117,7 @@ export const App: React.FC = () => {
         setError(d.error);
       } else {
         setNotConfigured(false);
+        setProjectLabels(Array.isArray(d.projectLabels) ? d.projectLabels : []);
         setData({ issues: d.issues ?? [], columns: d.columns ?? [] });
       }
     } catch (e) {
@@ -113,7 +131,18 @@ export const App: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [api, project?.path]);
+  }, [api, project?.path, scope]);
+
+  // Re-read the remembered scope when the user switches project.
+  useEffect(() => { setScope(loadScope(project?.path)); setRepoChip('all'); }, [project?.path]);
+
+  const switchScope = (next: Scope) => {
+    setScope(next);
+    setRepoChip('all');
+    if (project?.path) {
+      try { localStorage.setItem(SCOPE_KEY_PREFIX + project.path, next); } catch {}
+    }
+  };
 
   useEffect(() => {
     fetchIssues();
@@ -230,10 +259,46 @@ export const App: React.FC = () => {
     setSelectedIssue(issue);
   };
 
+  const hasProjectFilter = projectLabels.length > 0;
+  const showRepoChips = hasProjectFilter && scope === 'repo';
+
+  // Whole-repo view: one chip per project label found on the issues (status, priority
+  // and GitHub default labels are not project labels and never become chips).
+  const projectChips = useMemo(() => {
+    if (!data || !showRepoChips) return [] as Array<{ name: string; color: string; count: number }>;
+    const map = new Map<string, { name: string; color: string; count: number }>();
+    for (const issue of data.issues) {
+      for (const l of issue.labels) {
+        if (labelRole(l.name) !== 'other') continue;
+        const key = l.name.toLowerCase();
+        const entry = map.get(key) ?? { name: l.name, color: l.color, count: 0 };
+        entry.count++;
+        map.set(key, entry);
+      }
+    }
+    const own = new Set(projectLabels.map(l => l.toLowerCase()));
+    return [...map.values()].sort((a, b) => {
+      const ao = own.has(a.name.toLowerCase()) ? 0 : 1;
+      const bo = own.has(b.name.toLowerCase()) ? 0 : 1;
+      return ao - bo || b.count - a.count || a.name.localeCompare(b.name);
+    });
+  }, [data, showRepoChips, projectLabels]);
+
+  const noProjectCount = useMemo(() => {
+    if (!data || !showRepoChips) return 0;
+    return data.issues.filter(i => !i.labels.some(l => labelRole(l.name) === 'other')).length;
+  }, [data, showRepoChips]);
+
   // Filtered + sorted issues
   const processedIssues = useMemo(() => {
     if (!data) return [];
     let issues = data.issues;
+
+    if (showRepoChips && repoChip !== 'all') {
+      issues = repoChip === NO_PROJECT
+        ? issues.filter(i => !i.labels.some(l => labelRole(l.name) === 'other'))
+        : issues.filter(i => i.labels.some(l => l.name.toLowerCase() === repoChip.toLowerCase()));
+    }
 
     if (searchText.trim()) {
       const q = searchText.toLowerCase();
@@ -252,7 +317,7 @@ export const App: React.FC = () => {
     }
 
     return sortIssues(issues, sortBy, sortDir, priorityMap);
-  }, [data, searchText, activePriority, sortBy, sortDir, priorityMap]);
+  }, [data, searchText, activePriority, sortBy, sortDir, priorityMap, showRepoChips, repoChip]);
 
   // Status-column colors from real GitHub label colors (shared by board + modal pills).
   const resolvedColumns = useMemo(() => data ? resolveColumns(data.issues) : COLUMNS, [data]);
@@ -333,6 +398,26 @@ export const App: React.FC = () => {
       {/* Filter bar — only shown when data is loaded and on board tab */}
       {activeTab === 'board' && data && (
         <div className="cgi-filterbar" style={{ background: 'var(--cgi-surface)', borderBottom: '1px solid var(--cgi-border)' }}>
+          {/* Scope toggle — only when the project has a label filter */}
+          {hasProjectFilter && (
+            <div className="cgi-scope-toggle" role="group" aria-label="Board scope">
+              <button
+                className={`cgi-scope-btn${scope === 'project' ? ' active' : ''}`}
+                onClick={() => switchScope('project')}
+                title={`Only issues labeled ${projectLabels.join(' or ')}`}
+              >
+                This project: <strong>{projectLabels.length <= 2 ? projectLabels.join(', ') : `${projectLabels.length} labels`}</strong>
+              </button>
+              <button
+                className={`cgi-scope-btn${scope === 'repo' ? ' active' : ''}`}
+                onClick={() => switchScope('repo')}
+                title="All issues in the repository"
+              >
+                Whole repo
+              </button>
+            </div>
+          )}
+
           {/* Search */}
           <div className="cgi-search-wrap">
             <svg className="cgi-search-icon" width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
@@ -397,6 +482,36 @@ export const App: React.FC = () => {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Whole-repo view: quick filter by project label */}
+      {activeTab === 'board' && data && showRepoChips && (
+        <div className="cgi-project-chips" style={{ background: 'var(--cgi-surface)', borderBottom: '1px solid var(--cgi-border)' }}>
+          <button
+            className={`cgi-priority-pill${repoChip === 'all' ? ' active' : ''}`}
+            onClick={() => setRepoChip('all')}
+          >
+            All <span className="cgi-chip-count">{data.issues.length}</span>
+          </button>
+          {projectChips.map(c => (
+            <button
+              key={c.name}
+              className={`cgi-priority-pill${repoChip.toLowerCase() === c.name.toLowerCase() ? ' active' : ''}`}
+              onClick={() => setRepoChip(c.name)}
+              title={`Show only issues labeled ${c.name}`}
+            >
+              <span className="cgi-priority-pill-dot" style={{ background: `#${c.color}` }} />
+              {c.name} <span className="cgi-chip-count">{c.count}</span>
+            </button>
+          ))}
+          <button
+            className={`cgi-priority-pill${repoChip === NO_PROJECT ? ' active' : ''}`}
+            onClick={() => setRepoChip(NO_PROJECT)}
+            title="Issues without any project label"
+          >
+            No project <span className="cgi-chip-count">{noProjectCount}</span>
+          </button>
         </div>
       )}
 
@@ -475,6 +590,7 @@ export const App: React.FC = () => {
       {showNewIssue && project && (
         <NewIssueModal
           projectPath={projectPath}
+          projectLabels={projectLabels}
           onClose={() => setShowNewIssue(false)}
           onCreated={handleIssueCreated}
         />
