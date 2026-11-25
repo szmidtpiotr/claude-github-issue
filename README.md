@@ -51,9 +51,36 @@ Also auto-installs the `/github-task` skill so Claude can manage issues directly
 - Auto-switches sort to Priority after analysis
 - **Claude.ai subscription mode** — available in ⚙ Settings → "Use claude.ai →": generates a ready-to-paste prompt, paste Claude's JSON response back to apply priorities
 
+### Project label filter (one repo, many projects)
+If several projects share one GitHub repository and you tell them apart with labels
+(e.g. `project-a`, `project-b`), each project's board can show only its own issues:
+
+- **⚙ Settings → Project labels** — tick the label(s) of this project. The list is loaded
+  from the repository; status, priority and GitHub default labels are hidden behind
+  *Show status/priority labels* because they normally aren't project labels.
+- **Board** shows only issues carrying **at least one** of the selected labels.
+  Above the board a toggle switches between **This project** and **Whole repo**
+  (remembered per project). In *Whole repo* a row of chips — one per project label,
+  with counts, plus *No project* — filters the board to one project at a time.
+- **Plan tab** lists only the project's issues and hides milestones that hold none of them.
+- **New Issue** automatically gets the project label(s).
+- **`/github-task`** lists, moves, comments and orders the Plan only for the project's issues.
+- Nothing selected = whole repository, exactly as before. Existing config files keep working.
+
+Stored as an optional `labels` array in `github-sync.json`:
+```json
+{
+  "owner": "owner",
+  "repo": "repo",
+  "labels": ["project-a"]
+}
+```
+(the file also holds your token — keep it out of git).
+
 ### Settings (⚙ per project)
-- GitHub Personal Access Token
+- GitHub Personal Access Token (leave blank to keep the saved one)
 - Repository owner and name
+- Project labels (optional filter, see above)
 - Optional Anthropic API key (enables real AI prioritization)
 - Link to `/github-task` skill documentation
 - Config stored in `.GitHubBoard/github-sync.json` in the project root (not committed if added to `.gitignore`)
@@ -115,13 +142,31 @@ To enable real AI prioritization, also add:
 
 Moving an issue via the UI updates labels and state via the GitHub API immediately.
 
-### Priority Detection (from labels)
+### Labels with a special meaning
 
-| Priority | Detected from labels                                                            |
-|----------|---------------------------------------------------------------------------------|
-| High     | `critical`, `blocker`, `p0`, `urgent`, `security`, `high`, `priority:high`      |
-| Medium   | `p1`, `important`, `medium`, `priority:medium`                                  |
-| Low      | `p2`, `p3`, `low`, `nice-to-have`, `enhancement`, `priority:low`               |
+The plugin gives labels three separate jobs. A project label never changes the column
+or the priority, and a column move never touches project labels.
+
+**1. Status labels — decide the column** (added/removed when you move a card):
+`in-progress`, `review`, `blocked`; also `need-testing` (added together with `review`
+by `/github-task`), `deferred`, `cancelled` (removed on moves). Closed issue = Done.
+
+**2. Priority labels — matched by name** (exact or substring, case-insensitive):
+
+| Priority | Board pills / Priority sort (`priorityUtils.ts`) | AI Prioritize heuristic (`ai.service.ts`) |
+|----------|--------------------------------------------------|--------------------------------------------|
+| High     | `p0`, `critical`, `blocker`, `urgent`, `security`, `vulnerability`, `crash`, `data-loss`, `high`, `high-priority`, `priority:high` | critical: `critical`, `blocker`, `security`, `vulnerability`, `crash`, `data-loss`; high: `bug`, `high`, `p0`, `p1`, `urgent`, `priority:high` |
+| Medium   | `p1`, `important`, `medium`, `medium-priority`, `priority:medium` | — |
+| Low      | `p2`, `p3`, `low`, `low-priority`, `priority:low`, `nice-to-have`, `minor` | `nice-to-have`, `enhancement`, `feature`, `improvement`, `low`, `p3`, `wontfix`, `documentation`, `docs` |
+
+So e.g. `enhancement` lowers an issue's score in AI Prioritize (heuristic mode), and
+`bug` raises it.
+
+**3. Project labels — optional filter** from `labels` in `github-sync.json` (see
+*Project label filter*). Any label can be one; GitHub's default labels (`bug`,
+`documentation`, `duplicate`, `enhancement`, `good first issue`, `help wanted`,
+`invalid`, `question`, `wontfix`) and the status/priority labels above are not offered
+as project chips. The full list lives in `src/shared/labels.ts`.
 
 ---
 
@@ -138,6 +183,12 @@ Output:
 - `dist/frontend.js` — browser bundle (React, classic JSX runtime)
 - `dist/backend.js` — CommonJS Node.js server (listens on random port, reports `{"ready":true,"port":N}`)
 
+### Tests
+```bash
+npm test
+```
+Bundles `tests/*.test.ts` with esbuild and runs them with Node's built-in test runner.
+
 ### Dev watch mode
 ```bash
 npm run dev
@@ -149,6 +200,13 @@ npm run dev
 - **Plugin protocol:** `manifest.json` + `mount(container, api)` / `unmount(container)` exports
 
 ---
+
+## Changelog
+
+- **1.11.0** — Project label filter: optional `labels` in `github-sync.json`, label picker in
+  Settings, *This project / Whole repo* toggle with project chips, auto-label for new issues,
+  Plan tab and `/github-task` scoped to the project. Token can be left blank in Settings to
+  keep the saved one.
 
 ## Contributing
 
