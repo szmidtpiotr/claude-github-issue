@@ -8570,6 +8570,7 @@ const PRIORITY_LABEL_PATTERNS = [
   "docs"
 ];
 const GITHUB_DEFAULT_LABELS = [
+  "accessibility",
   "bug",
   "documentation",
   "duplicate",

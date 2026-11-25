@@ -77,5 +77,6 @@ test('labelRole keeps status / priority / default labels apart from project labe
   assert.equal(labelRole('bug'), 'priority');
   assert.equal(labelRole('question'), 'default');
   assert.equal(labelRole('good first issue'), 'default');
+  assert.equal(labelRole('accessibility'), 'default');
   assert.equal(labelRole('project-a'), 'other');
 });

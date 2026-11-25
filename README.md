@@ -163,7 +163,7 @@ So e.g. `enhancement` lowers an issue's score in AI Prioritize (heuristic mode),
 `bug` raises it.
 
 **3. Project labels — optional filter** from `labels` in `github-sync.json` (see
-*Project label filter*). Any label can be one; GitHub's default labels (`bug`,
+*Project label filter*). Any label can be one; GitHub's default labels (`accessibility`, `bug`,
 `documentation`, `duplicate`, `enhancement`, `good first issue`, `help wanted`,
 `invalid`, `question`, `wontfix`) and the status/priority labels above are not offered
 as project chips. The full list lives in `src/shared/labels.ts`.

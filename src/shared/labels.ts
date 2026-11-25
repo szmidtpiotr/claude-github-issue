@@ -36,7 +36,7 @@ export const PRIORITY_LABEL_PATTERNS = [
 
 /** Labels GitHub creates in every new repository. Not project labels. */
 export const GITHUB_DEFAULT_LABELS = [
-  'bug', 'documentation', 'duplicate', 'enhancement', 'good first issue',
+  'accessibility', 'bug', 'documentation', 'duplicate', 'enhancement', 'good first issue',
   'help wanted', 'invalid', 'question', 'wontfix',
 ] as const;
 

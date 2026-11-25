@@ -180,6 +180,7 @@ var PRIORITY_LABEL_PATTERNS = [
   "docs"
 ];
 var GITHUB_DEFAULT_LABELS = [
+  "accessibility",
   "bug",
   "documentation",
   "duplicate",
