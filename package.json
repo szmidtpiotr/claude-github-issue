@@ -8,7 +8,8 @@
     "build": "npm run build:backend && npm run build:frontend",
     "build:frontend": "vite build",
     "build:backend": "esbuild src/backend/server.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/backend.js --external:crypto --external:fs --external:path --external:http --external:os --external:url",
-    "dev": "concurrently \"npm run build:backend -- --watch\" \"vite build --watch\""
+    "dev": "concurrently \"npm run build:backend -- --watch\" \"vite build --watch\"",
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

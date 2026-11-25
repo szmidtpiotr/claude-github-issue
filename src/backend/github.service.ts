@@ -160,3 +160,22 @@ export async function createMilestone(
     { title }
   ) as Promise<GithubMilestone>;
 }
+
+export interface GithubLabel {
+  name: string;
+  color: string;
+  description: string | null;
+}
+
+export async function listLabels(token: string, owner: string, repo: string): Promise<GithubLabel[]> {
+  const all: GithubLabel[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const batch = await githubFetch(
+      token, 'GET',
+      `/repos/${owner}/${repo}/labels?per_page=100&page=${page}`
+    ) as GithubLabel[];
+    all.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return all;
+}
