@@ -1196,3 +1196,83 @@
   font-size: 12px; opacity: 0.8; cursor: pointer; user-select: none; margin-left: 4px;
 }
 .cgi-plan-toggle input { cursor: pointer; margin: 0; }
+
+/* ---- Project label filter: scope toggle + whole-repo project chips ---- */
+.cgi-scope-toggle {
+  display: inline-flex;
+  border: 1px solid var(--cgi-border);
+  border-radius: 20px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.cgi-scope-btn {
+  padding: 3px 10px;
+  border: none;
+  background: var(--cgi-btn-bg);
+  color: var(--cgi-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.cgi-scope-btn + .cgi-scope-btn {
+  border-left: 1px solid var(--cgi-border);
+}
+
+.cgi-scope-btn:hover {
+  background: var(--cgi-btn-hover-bg);
+}
+
+.cgi-scope-btn.active {
+  background: var(--cgi-accent);
+  color: #fff;
+}
+
+.cgi-project-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 14px;
+  flex-shrink: 0;
+}
+
+.cgi-chip-count {
+  opacity: 0.6;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cgi-label-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.cgi-label-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--cgi-border);
+  background: var(--cgi-btn-bg);
+  color: var(--cgi-text);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cgi-label-option input {
+  margin: 0;
+  accent-color: var(--cgi-accent);
+}
+
+.cgi-label-option.checked {
+  border-color: var(--cgi-accent);
+}

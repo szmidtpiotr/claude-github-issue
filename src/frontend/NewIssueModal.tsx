@@ -4,11 +4,13 @@ import type { GithubIssue } from './types';
 
 interface Props {
   projectPath: string;
+  /** Project filter labels — the backend adds them to the new issue automatically. */
+  projectLabels?: string[];
   onClose: () => void;
   onCreated: (issue: GithubIssue) => void;
 }
 
-export const NewIssueModal: React.FC<Props> = ({ projectPath, onClose, onCreated }) => {
+export const NewIssueModal: React.FC<Props> = ({ projectPath, projectLabels = [], onClose, onCreated }) => {
   const api = usePluginAPI();
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -103,6 +105,12 @@ export const NewIssueModal: React.FC<Props> = ({ projectPath, onClose, onCreated
               style={{ ...inputStyle, minHeight: 100, resize: 'vertical' }}
             />
           </div>
+
+          {projectLabels.length > 0 && (
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Project label added automatically: <strong>{projectLabels.join(', ')}</strong>
+            </div>
+          )}
 
           {error && (
             <div style={{ background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#ef4444' }}>

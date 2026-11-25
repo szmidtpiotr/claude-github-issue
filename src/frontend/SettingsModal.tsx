@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { usePluginAPI } from './PluginContext';
 
+interface RepoLabel {
+  name: string;
+  color: string;
+  description: string | null;
+  role: 'status' | 'priority' | 'default' | 'other';
+}
+
 interface Props {
   projectPath: string;
   onClose: () => void;
@@ -24,6 +31,42 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [showToken, setShowToken] = useState(false);
+  const [hasSavedToken, setHasSavedToken] = useState(false);
+  // Project label filter
+  const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
+  const [repoLabels, setRepoLabels] = useState<RepoLabel[] | null>(null);
+  const [labelsLoading, setLabelsLoading] = useState(false);
+  const [labelsError, setLabelsError] = useState<string | null>(null);
+  const [showSpecialLabels, setShowSpecialLabels] = useState(false);
+
+  const loadLabels = async (owner: string, repo: string) => {
+    if (!owner.trim() || !repo.trim()) return;
+    setLabelsLoading(true);
+    setLabelsError(null);
+    try {
+      const res = await api.rpc(
+        'GET',
+        `/labels?path=${encodeURIComponent(projectPath)}&owner=${encodeURIComponent(owner.trim())}&repo=${encodeURIComponent(repo.trim())}`
+      ) as { labels?: RepoLabel[]; notConfigured?: boolean; error?: string };
+      if (res.notConfigured) {
+        setRepoLabels(null);
+        setLabelsError('Save the token first, then load labels.');
+      } else {
+        setRepoLabels(res.labels ?? []);
+      }
+    } catch (e) {
+      setRepoLabels(null);
+      setLabelsError(e instanceof Error ? e.message : 'Could not load labels.');
+    } finally {
+      setLabelsLoading(false);
+    }
+  };
+
+  const toggleLabel = (name: string) => {
+    setSelectedLabels(prev => prev.some(l => l.toLowerCase() === name.toLowerCase())
+      ? prev.filter(l => l.toLowerCase() !== name.toLowerCase())
+      : [...prev, name]);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -31,8 +74,11 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
     api.rpc('GET', `/config?path=${encodeURIComponent(projectPath)}`)
       .then(res => {
         if (cancelled) return;
-        const d = res as { configured?: boolean; owner?: string; repo?: string; hasToken?: boolean; hasAnthropicKey?: boolean };
+        const d = res as { configured?: boolean; owner?: string; repo?: string; hasToken?: boolean; hasAnthropicKey?: boolean; labels?: string[] };
         if (d.configured) {
+          setHasSavedToken(Boolean(d.hasToken));
+          setSelectedLabels(Array.isArray(d.labels) ? d.labels : []);
+          if (d.hasToken && d.owner && d.repo) void loadLabels(d.owner, d.repo);
           setForm(f => ({
             ...f,
             owner: d.owner ?? '',
@@ -52,18 +98,19 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
       setError('Owner and repository name are required.');
       return;
     }
-    if (!form.token.trim()) {
+    if (!form.token.trim() && !hasSavedToken) {
       setError('GitHub token is required. You can find it at github.com → Settings → Developer settings → Personal access tokens.');
       return;
     }
     setSaving(true);
     try {
       await api.rpc('PUT', `/config?path=${encodeURIComponent(projectPath)}`, {
-        token: form.token.trim(),
+        token: form.token.trim() || undefined, // blank = keep the saved token
         owner: form.owner.trim(),
         repo: form.repo.trim(),
         enabled: true,
         anthropicKey: form.anthropicKey.trim() || undefined,
+        labels: selectedLabels,
       });
       setSuccess(true);
       setTimeout(() => {
@@ -128,7 +175,7 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
                   type={showToken ? 'text' : 'password'}
                   value={form.token}
                   onChange={e => setForm(f => ({ ...f, token: e.target.value }))}
-                  placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                  placeholder={hasSavedToken ? '•••••••• saved — leave blank to keep' : 'ghp_xxxxxxxxxxxxxxxxxxxx'}
                   style={{ ...inputStyle, paddingRight: 38 }}
                   autoComplete="off"
                 />
@@ -151,7 +198,7 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
               <input
                 type="text"
                 value={form.owner}
-                onChange={e => setForm(f => ({ ...f, owner: e.target.value }))}
+                onChange={e => { setForm(f => ({ ...f, owner: e.target.value })); setRepoLabels(null); }}
                 placeholder="your-github-username"
                 style={inputStyle}
                 autoComplete="off"
@@ -164,11 +211,73 @@ export const SettingsModal: React.FC<Props> = ({ projectPath, onClose, onSaved, 
               <input
                 type="text"
                 value={form.repo}
-                onChange={e => setForm(f => ({ ...f, repo: e.target.value }))}
+                onChange={e => { setForm(f => ({ ...f, repo: e.target.value })); setRepoLabels(null); }}
                 placeholder="your-repository-name"
                 style={inputStyle}
                 autoComplete="off"
               />
+            </div>
+
+            {/* Project label filter */}
+            <div>
+              <label style={labelStyle}>
+                Project labels <span style={{ opacity: 0.5, fontWeight: 400, textTransform: 'none', fontSize: 11 }}>(optional — show only this project's issues)</span>
+              </label>
+              {labelsLoading ? (
+                <div style={{ fontSize: 12, opacity: 0.5 }}>Loading labels…</div>
+              ) : repoLabels ? (() => {
+                const projectCandidates = repoLabels.filter(l => l.role === 'other');
+                const special = repoLabels.filter(l => l.role !== 'other');
+                const known = new Set(repoLabels.map(l => l.name.toLowerCase()));
+                const missing = selectedLabels.filter(l => !known.has(l.toLowerCase()));
+                const shown = showSpecialLabels ? [...projectCandidates, ...special] : projectCandidates;
+                const isOn = (n: string) => selectedLabels.some(l => l.toLowerCase() === n.toLowerCase());
+                return (
+                  <>
+                    <div className="cgi-label-picker">
+                      {shown.map(l => (
+                        <label key={l.name} className={`cgi-label-option${isOn(l.name) ? ' checked' : ''}`} title={l.description ?? l.name}>
+                          <input type="checkbox" checked={isOn(l.name)} onChange={() => toggleLabel(l.name)} />
+                          <span className="cgi-priority-pill-dot" style={{ background: `#${l.color}` }} />
+                          {l.name}
+                          {l.role !== 'other' && <span style={{ opacity: 0.5, fontSize: 10 }}>{l.role}</span>}
+                        </label>
+                      ))}
+                      {missing.map(name => (
+                        <label key={name} className="cgi-label-option checked" title="Not found in the repository">
+                          <input type="checkbox" checked onChange={() => toggleLabel(name)} />
+                          {name} <span style={{ opacity: 0.5, fontSize: 10 }}>missing</span>
+                        </label>
+                      ))}
+                      {shown.length === 0 && missing.length === 0 && (
+                        <span style={{ fontSize: 12, opacity: 0.5 }}>No project labels in this repository yet.</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.5, marginTop: 4, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <span>
+                        {selectedLabels.length === 0
+                          ? 'Nothing selected — the board shows the whole repository.'
+                          : 'Board, Plan and new issues use issues with any of the selected labels.'}
+                      </span>
+                      {special.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowSpecialLabels(v => !v)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--cgi-accent)', fontSize: 11, padding: 0, whiteSpace: 'nowrap' }}
+                          title="Status, priority and GitHub default labels drive columns and priority — usually not project labels"
+                        >
+                          {showSpecialLabels ? 'Hide' : 'Show'} status/priority labels
+                        </button>
+                      )}
+                    </div>
+                  </>
+                );
+              })() : (
+                <div style={{ fontSize: 12, opacity: 0.6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>{labelsError ?? 'Labels not loaded.'}</span>
+                  <button type="button" className="cgi-btn" onClick={() => void loadLabels(form.owner, form.repo)}>Load labels</button>
+                </div>
+              )}
             </div>
 
             {/* Anthropic Key (optional) */}
