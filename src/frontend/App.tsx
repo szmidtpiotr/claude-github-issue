@@ -406,7 +406,7 @@ export const App: React.FC = () => {
                 onClick={() => switchScope('project')}
                 title={`Only issues labeled ${projectLabels.join(' or ')}`}
               >
-                This project: <strong>{projectLabels.join(', ')}</strong>
+                This project: <strong>{projectLabels.length <= 2 ? projectLabels.join(', ') : `${projectLabels.length} labels`}</strong>
               </button>
               <button
                 className={`cgi-scope-btn${scope === 'repo' ? ' active' : ''}`}

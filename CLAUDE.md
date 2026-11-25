@@ -19,6 +19,22 @@ Plugin contract (claudecodeui plugin system):
 
 Remote: `origin` → `https://github.com/szmidtpiotr/claude-github-issue`
 
+## Git rules (keep these — they prevent split history)
+
+- **One working clone only.** Work in the clone that is the open project in the UI.
+  Never create a second clone inside or next to it (a nested clone once got committed
+  as a gitlink and two lines of work drifted apart for months).
+- **`main` is the only long-lived branch.** Every change starts as a short branch cut from
+  the current `origin/main` (`git fetch && git switch -c feat/x origin/main`), never from
+  another feature branch.
+- Finish a branch quickly: open a PR → merge into `main` → the branch is deleted
+  automatically on merge (repo setting). Do not leave finished work on a side branch.
+- Before starting, check: `git fetch && git log --oneline HEAD..origin/main` must be empty
+  for the base you branch from. If it isn't, you are on a stale base — rebase or re-branch.
+- The installed plugin (`~/.claude-code-ui/plugins/claude-github-issue/`) tracks `main`.
+  Only switch it to a feature branch for a live test, and switch it back after merge.
+- Old abandoned work is kept as a tag `archive/<branch-name>`, not as a branch.
+
 ## File layout
 
 ```
@@ -52,6 +68,9 @@ dist/
   backend.js           Committed! esbuild output
 vite.config.ts         Vite config — react({ jsxRuntime: 'classic' }) is mandatory
 tsconfig.json
+src/shared/labels.ts   Label roles (status / priority / default / project) + project filter
+src/backend/plan.*.ts  Plan tab (milestones = phases, order store .GitHubBoard/plan.json)
+tests/                 node:test tests, run with `npm test` (esbuild bundle)
 ```
 
 ## Config file
@@ -97,17 +116,19 @@ Build outputs:
 # 2. Build
 npm run build
 
-# 3. Commit source + dist together
+# 3. Test
+npm test
+
+# 4. Commit source + dist together on the feature branch, push, open + merge a PR
 git add src/ dist/ manifest.json  # add other changed files as needed
 git commit -m "feat/fix: describe the change"
-
-# 4. Push
-git push origin main
+git push -u origin HEAD
+gh pr create --fill && gh pr merge --merge   # branch auto-deleted after merge
 
 # 5. Update the GitHub release
 #    - Patch fix → bump patch version (1.0.1 → 1.0.2)
 #    - New feature → bump minor version (1.0.x → 1.1.0)
-#    Current latest release: v1.0.1
+#    Always check the real latest first: gh release list --limit 1
 
 gh release create vX.Y.Z \
   --title "vX.Y.Z — Short description" \
@@ -132,8 +153,7 @@ Users who already installed the plugin need to: Settings → Plugins → Reinsta
 
 ## GitHub releases history
 
-- `v1.0.0` — Initial release
-- `v1.0.1` — Fix: lightbox src was undefined (property name mismatch `url` vs `src`)
+See `gh release list` — the source of truth. README.md has a short changelog.
 
 ## Anthropic API (AI Prioritize feature)
 

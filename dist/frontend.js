@@ -8927,7 +8927,7 @@ const App = () => {
       title: `Only issues labeled ${projectLabels.join(" or ")}`
     },
     "This project: ",
-    /* @__PURE__ */ React.createElement("strong", null, projectLabels.join(", "))
+    /* @__PURE__ */ React.createElement("strong", null, projectLabels.length <= 2 ? projectLabels.join(", ") : `${projectLabels.length} labels`)
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
